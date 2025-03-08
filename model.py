@@ -129,6 +129,35 @@ class Value:
         out._backward = _backward
         return out
 
+    def sigmoid(self):
+        s = 1 / (1 + np.exp(-self.data))
+        out = Value(s, (self,), 'sigmoid')
+
+        def _backward():
+            if self.grad.shape != self.data.shape:
+                self.grad = np.zeros_like(self.data)
+
+            self.grad += s * (1 - s) * out.grad
+
+        out._backward = _backward
+        return out
+
+    def relu(self):
+        r = np.maximum(0, self.data)
+        out = Value(r, (self,), 'relu')
+
+        def _backward():
+            if self.grad is None or self.grad.shape != self.data.shape:
+                self.grad = np.zeros_like(self.data)
+
+            # Apply ReLU gradient
+            self.grad += (self.data > 0).astype(self.data.dtype) * out.grad
+
+        out._backward = _backward
+        return out
+
+        
+
     def exp(self):
         e = np.exp(self.data)
         out = Value(e, (self,), 'exp')
@@ -181,7 +210,7 @@ class Layer:
         # print("Linear input shape after reshape: ", x.data.shape)
 
         if self.apply_nonlin:
-          out = (x@self.w + self.b).tanh()
+          out = (x@self.w + self.b).sigmoid()
           # out.label = "Linear addition"
         else:
           out = x@self.w + self.b
