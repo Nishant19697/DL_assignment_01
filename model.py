@@ -1,40 +1,7 @@
 import numpy as np
-from tensorflow.keras.datasets import fashion_mnist
+from tensorflow.keras.datasets import fashion_mnist, mnist
 import pandas as pd
-
-(X_train, y_train), (_, _) = fashion_mnist.load_data()
-
-print(f"Dataset shape: {X_train.shape}, Labels shape: {y_train.shape}")  
-
-X_train_flattened = X_train.reshape(X_train.shape[0], -1).astype(np.float32)
-y_train_reshaped = y_train.reshape(-1, 1)  
-indices = np.random.permutation(np.arange(X_train.shape[0]))
-# print(indices)
-X_train_flattened = X_train_flattened[indices]
-y_train_reshaped = y_train_reshaped[indices]
-X_train_flattened /= 255
-
-df = pd.DataFrame(X_train_flattened)
-df['label'] = y_train_reshaped 
-
-
-X_train_np = X_train_flattened  
-y_train_np = y_train_reshaped.flatten()  
-
-xs = X_train_np.tolist()
-ys = y_train_np.tolist()
-
-n_samples = len(xs)
-
-xs_train = xs[:int(0.9*n_samples)]
-ys_train = ys[:int(0.9*n_samples)]
-
-xs_dev = xs[int(0.9*n_samples):]
-ys_dev = ys[int(0.9*n_samples):]
-
-
-print(f"Total Samples in train: {len(xs_train)}, Unique Labels: {set(ys)}")
-print(f"Total Samples in dev : {len(xs_dev)}, Unique Labels: {set(ys)}")
+import wandb
 
 class Value:
     def __init__(self, data, _children=(), _op='', label=''):
@@ -193,25 +160,35 @@ class Value:
 
 
 class Layer:
-    def __init__(self, nin, nout, apply_nonlin=True):
+    def __init__(self, nin, nout, apply_nonlin=True, nonlin_name=None, init=None):
         self.apply_nonlin = apply_nonlin
-        bound = np.sqrt(6 / (nin + nout))
-        self.w = Value(np.random.uniform(-bound, bound, (nin, nout)))  # (nout, nin)
+        self.nonlin_name = nonlin_name
+        
+        if init == "Xavier":
+            bound = np.sqrt(6 / (nin + nout))
+            self.w = Value(np.random.uniform(-bound, bound, (nin, nout)))
+        elif init == "kaiming":  # He initialization
+            std = np.sqrt(2 / nin)
+            self.w = Value(np.random.randn(nin, nout) * std)
+        elif init == "random":
+            self.w = Value(np.random.randn(nin, nout) * 0.01)
+        else:
+            raise ValueError(f"Unknown initialization method : {init}")
+        # self.w = Value(np.random.uniform(-bound, bound, (nin, nout)))  # (nout, nin)
         self.b = Value(np.zeros((1, nout)))  # (nout, 1)
-        # print("Linear : ", self.w.data.shape, self.b.data.shape)
 
     def __call__(self, x):
-        # print("Linear input shape : ", x.data.shape, type(x))
-        # print("Linear weight shape : ", self.w.data.shape, type(self.w))
-        # print("Linear bias shape : ", self.b.data.shape, type(self.b))
 
-
-        # x = Value(np.array(x).reshape(-1, 1))
-        # print("Linear input shape after reshape: ", x.data.shape)
 
         if self.apply_nonlin:
-          out = (x@self.w + self.b).sigmoid()
-          # out.label = "Linear addition"
+            if self.nonlin_name == "sigmoid":
+                out = (x@self.w + self.b).sigmoid()
+            elif self.nonlin_name == "tanh":
+                out = (x@self.w + self.b).tanh()
+            elif self.nonlin_name == "ReLU":
+                out = (x@self.w + self.b).relu()
+            else:
+                raise ValueError(f"Unsupported Activation function : {self.nonlin_name}")
         else:
           out = x@self.w + self.b
         # print("Linear out : ", out.data.shape)
@@ -224,10 +201,11 @@ class Layer:
 
 
 class MLP:
-    def __init__(self, nin, nouts):
+    def __init__(self, nin, nouts, args):
         sizes = [nin] + nouts[:-1]
-        self.layers = [Layer(sizes[i], sizes[i+1], True) for i in range(len(nouts[:-1]))]
-        self.layers.append(Layer(nouts[-2], nouts[-1], False))
+        print("aaaaa : ", args.weight_init, args.activation)
+        self.layers = [Layer(sizes[i], sizes[i+1], apply_nonlin=True, nonlin_name=args.activation, init=args.weight_init) for i in range(len(nouts[:-1]))]
+        self.layers.append(Layer(nouts[-2], nouts[-1], apply_nonlin=False, init=args.weight_init))
 
     def __call__(self, x):
         # x = np.array(x).reshape(-1, 1)  # Ensure input is column vector
@@ -377,79 +355,120 @@ class SoftmaxCrossEntropy:
         return loss, softmax
 
 
-# n_bits = 4
-
-# xs = [np.binary_repr(i, width=n_bits) for i in np.arange(2**n_bits)]
-# xs = np.array([np.array([int(y) for y in x]) for x in xs])
-
-# ys = (xs[:, 0] == 1).astype(int)
-
-# print(xs.shape, ys.shape)
-
-# xs_train = Value(xs_train)
-# ys_train = np.array(ys_train)  # Ensure ys remains a NumPy array
-
-batch_size = 32
-
-def create_batch(lst, batch_size):
-    return [lst[i:i + batch_size] for i in range(0, len(lst), batch_size)]
-
-xs_train_batches = create_batch(xs_train, batch_size)
-ys_train_batches = create_batch(ys_train, batch_size)
-
-assert len(xs_train_batches) == len(ys_train_batches)
-
-n_batches = len(xs_train_batches)
+def trainer(args, logging):
 
 
-model = MLP(784, [256, 256,256,10])
-loss_fn = SoftmaxCrossEntropy()
-# lr = 0.01
-opt = optimizer(model, learning_rate= 0.001, algo = "adam")
-for k in range(10):
-    avg_loss = 0
-    avg_acc = 0
+    if args.dataset == "fashion_mnist":
+        (X_train, y_train), (_, _) = fashion_mnist.load_data()
+    elif args.dataset == "mnist":
+        (X_train, y_train), (_, _) = mnist.load_data()
+        
+    print(f"Dataset shape: {X_train.shape}, Labels shape: {y_train.shape}")  
 
-    for xs_batch, ys_batch in zip(xs_train_batches, ys_train_batches):
+    X_train_flattened = X_train.reshape(X_train.shape[0], -1).astype(np.float32)
+    y_train_reshaped = y_train.reshape(-1, 1)  
+    indices = np.random.permutation(np.arange(X_train.shape[0]))
+    X_train_flattened = X_train_flattened[indices]
+    y_train_reshaped = y_train_reshaped[indices]
+    X_train_flattened /= 255
 
-        xs_batch = Value(xs_batch)
-        ys_batch = np.array(ys_batch)
+    df = pd.DataFrame(X_train_flattened)
+    df['label'] = y_train_reshaped 
 
-        for p in model.parameters():
-            p.grad.fill(0)  
-        ypred = model(xs_batch)
-        loss, softmax = loss_fn(ypred, ys_batch)
 
-        loss.backward()
-        opt.update()
+    X_train_np = X_train_flattened  
+    y_train_np = y_train_reshaped.flatten()  
 
-        avg_loss += (loss.data/n_batches)
+    xs = X_train_np.tolist()
+    ys = y_train_np.tolist()
 
-        max_ = np.argmax(ypred.data, axis=1)
-        correct_predictions = np.sum(max_ == ys_batch)
-        accuracy = correct_predictions / batch_size  
+    n_samples = len(xs)
 
-        avg_acc += (accuracy/n_batches)
+    xs_train = xs[:int(0.9*n_samples)]
+    ys_train = ys[:int(0.9*n_samples)]
 
-    print(f"Iteration {k}: Loss = {loss.data} | acc : {avg_acc*100}")  
+    xs_dev = xs[int(0.9*n_samples):]
+    ys_dev = ys[int(0.9*n_samples):]
+
+
+    print(f"Total Samples in train: {len(xs_train)}, Unique Labels: {set(ys)}")
+    print(f"Total Samples in dev : {len(xs_dev)}, Unique Labels: {set(ys)}")
+
+
+    batch_size = args.batch_size
+
+    def create_batch(lst, batch_size):
+        return [lst[i:i + batch_size] for i in range(0, len(lst), batch_size)]
+
+    xs_train_batches = create_batch(xs_train, batch_size)
+    ys_train_batches = create_batch(ys_train, batch_size)
+
+    assert len(xs_train_batches) == len(ys_train_batches)
+
+    n_batches = len(xs_train_batches)
+
+
+    hidden_size = [args.hidden_size] * args.num_layers + [10]
+
+    model = MLP(784, hidden_size, args)
+    loss_fn = SoftmaxCrossEntropy()
+    # lr = 0.01
+    opt = optimizer(model, learning_rate= 0.001, algo = args.optimizer, beta1 = args.beta1, beta2=args.beta2, eps=args.epsilon, momentum=args.momentum, weight_decay=args.weight_decay)
     
+    
+    xs_dev = Value(xs_dev)
+    ys_dev = np.array(ys_dev)
+    
+    
+    for k in range(args.epochs):
+        avg_loss = 0
+        avg_acc = 0
 
-xs_dev = Value(xs_dev)
-ys_dev = np.array(ys_dev)
-ypred = model(xs_dev)
-max_ = np.argmax(ypred.data, axis=1)
-correct_predictions = np.sum(max_ == ys_dev)  
-total_samples = len(ys_dev)  
+        for xs_batch, ys_batch in zip(xs_train_batches, ys_train_batches):
 
-accuracy = correct_predictions / total_samples  
-accuracy_percentage = accuracy * 100  
+            xs_batch = Value(xs_batch)
+            ys_batch = np.array(ys_batch)
 
-print(f"Accuracy: {accuracy:.4f} ({accuracy_percentage:.2f}%)")
+            for p in model.parameters():
+                p.grad.fill(0)  
+            ypred = model(xs_batch)
+            loss, softmax = loss_fn(ypred, ys_batch)
 
-print("\n\n")
-print("Target : ", ys_dev)
-print("Predicted : ", max_)
-print(f"Accuracy: {accuracy:.4f} ({accuracy_percentage:.2f}%)")
-# print("accuracy:" np.where )
-# print("Predicted : ", (ypred.data > 0).astype(int).reshape(-1))
+            loss.backward()
+            opt.update()
+
+            avg_loss += (loss.data/n_batches)
+
+            max_ = np.argmax(ypred.data, axis=1)
+            correct_predictions = np.sum(max_ == ys_batch)
+            accuracy = correct_predictions / batch_size  
+
+            avg_acc += (accuracy/n_batches)
+
+        if logging:
+            wandb.log({"train_loss":loss.data, "train_acc":avg_acc})
+        print(f"Iteration {k}: Loss = {loss.data} | acc : {avg_acc*100}")  
+        
+
+        # validation
+        ypred = model(xs_dev)
+        loss, softmax = loss_fn(ypred, ys_dev)
+        max_ = np.argmax(ypred.data, axis=1)
+        correct_predictions = np.sum(max_ == ys_dev)  
+        total_samples = len(ys_dev)  
+
+        accuracy = correct_predictions / total_samples  
+        accuracy_percentage = accuracy * 100  
+        
+        if logging:
+            wandb.log({"valid_loss":loss.data, "valid_acc":accuracy})
+
+        print(f"Accuracy: {accuracy:.4f} ({accuracy_percentage:.2f}%)")
+
+        # print("\n\n")
+        # print("Target : ", ys_dev)
+        # print("Predicted : ", max_)
+        # print(f"Accuracy: {accuracy:.4f} ({accuracy_percentage:.2f}%)")
+        # # print("accuracy:" np.where )
+        # # print("Predicted : ", (ypred.data > 0).astype(int).reshape(-1))
 
