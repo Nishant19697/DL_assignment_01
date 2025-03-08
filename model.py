@@ -2,26 +2,39 @@ import numpy as np
 from tensorflow.keras.datasets import fashion_mnist
 import pandas as pd
 
-
 (X_train, y_train), (_, _) = fashion_mnist.load_data()
 
-print(f"Dataset shape: {X_train.shape}, Labels shape: {y_train.shape}") 
+print(f"Dataset shape: {X_train.shape}, Labels shape: {y_train.shape}")  
+
 X_train_flattened = X_train.reshape(X_train.shape[0], -1).astype(np.float32)
 y_train_reshaped = y_train.reshape(-1, 1)  
+indices = np.random.permutation(np.arange(X_train.shape[0]))
+# print(indices)
+X_train_flattened = X_train_flattened[indices]
+y_train_reshaped = y_train_reshaped[indices]
+X_train_flattened /= 255
+
 df = pd.DataFrame(X_train_flattened)
-df['label'] = y_train_reshaped  
+df['label'] = y_train_reshaped 
+
+
 X_train_np = X_train_flattened  
 y_train_np = y_train_reshaped.flatten()  
-
 
 xs = X_train_np.tolist()
 ys = y_train_np.tolist()
 
-print(f"Total Samples: {len(xs)}, Unique Labels: {set(ys)}")
+n_samples = len(xs)
+
+xs_train = xs[:int(0.9*n_samples)]
+ys_train = ys[:int(0.9*n_samples)]
+
+xs_dev = xs[int(0.9*n_samples):]
+ys_dev = ys[int(0.9*n_samples):]
 
 
-
-
+print(f"Total Samples in train: {len(xs_train)}, Unique Labels: {set(ys)}")
+print(f"Total Samples in dev : {len(xs_dev)}, Unique Labels: {set(ys)}")
 
 class Value:
     def __init__(self, data, _children=(), _op='', label=''):
@@ -78,11 +91,11 @@ class Value:
     def __truediv__(self, other):
       other = other if isinstance(other, Value) else Value(other)
       # print("truediv other : ", other)
-      return self * other**-1.0  
+      return self * other**-1.0 
     
 
 
-    def __matmul__(self, other):  
+    def __matmul__(self, other): 
       other = other if isinstance(other, Value) else Value(other)
       # print(self.data.shape, other.data.shape)
       out = Value(self.data @ other.data, (self, other), '@')
@@ -138,7 +151,7 @@ class Value:
                 topo.append(v)
 
         build_topo(self)
-        self.grad = np.ones_like(self.data)  #
+        self.grad = np.ones_like(self.data) 
 
         for node in reversed(topo):
             # for prev in node._prev:
@@ -154,8 +167,8 @@ class Layer:
     def __init__(self, nin, nout, apply_nonlin=True):
         self.apply_nonlin = apply_nonlin
         bound = np.sqrt(6 / (nin + nout))
-        self.w = Value(np.random.uniform(-bound, bound, (nin, nout))) 
-        self.b = Value(np.zeros((1, nout))) 
+        self.w = Value(np.random.uniform(-bound, bound, (nin, nout)))  # (nout, nin)
+        self.b = Value(np.zeros((1, nout)))  # (nout, 1)
         # print("Linear : ", self.w.data.shape, self.b.data.shape)
 
     def __call__(self, x):
@@ -203,11 +216,10 @@ class MLP:
     def parameters(self):
         return [p for layer in self.layers for p in layer.parameters()]
     
+
 #optimizers    
-
 class optimizer:
-    def __init__(self, model, learning_rate=0.01, algo="sgd", beta1=0.9, beta2=0.999, eps=1e-8, decay_factor=0.9, momentum=0.9):
-
+    def __init__(self, model, learning_rate=0.01, algo="sgd", beta1=0.9, beta2=0.999, eps=1e-8, decay_factor=0.9, momentum=0.9, weight_decay=0.0, amsgrad=False):
         self.model = model
         self.lr = learning_rate
         self.algo = algo.lower()
@@ -216,11 +228,14 @@ class optimizer:
         self.eps = eps
         self.decay = decay_factor
         self.momentum = momentum
+        self.weight_decay = weight_decay
+        self.amsgrad = amsgrad
         self.time_step = 1 
         
         self.vel = {param: np.zeros_like(param.data) for param in model.parameters()}
         self.first_moment = {param: np.zeros_like(param.data) for param in model.parameters()}
         self.second_moment = {param: np.zeros_like(param.data) for param in model.parameters()}
+        self.v_max = {param: np.zeros_like(param.data) for param in model.parameters()} if amsgrad else None
     
     def update(self):
         for param in self.model.parameters():
@@ -241,11 +256,18 @@ class optimizer:
                 param.data -= self.lr * param.grad / (np.sqrt(self.second_moment[param]) + self.eps)
 
             elif self.algo == "adam":
+                if self.weight_decay != 0:
+                    param.grad += self.weight_decay * param.data
+
                 self.first_moment[param] = self.beta1 * self.first_moment[param] + (1 - self.beta1) * param.grad
                 self.second_moment[param] = self.beta2 * self.second_moment[param] + (1 - self.beta2) * (param.grad ** 2)
 
                 first_moment_corrected = self.first_moment[param] / (1 - self.beta1 ** self.time_step)
                 second_moment_corrected = self.second_moment[param] / (1 - self.beta2 ** self.time_step)
+
+                if self.amsgrad:
+                    self.v_max[param] = np.maximum(self.v_max[param], second_moment_corrected)
+                    second_moment_corrected = self.v_max[param]
 
                 param.data -= self.lr * first_moment_corrected / (np.sqrt(second_moment_corrected) + self.eps)
 
@@ -259,27 +281,27 @@ class optimizer:
                 nadam_adjustment = (self.beta1 * first_moment_corrected + (1 - self.beta1) * param.grad) / (np.sqrt(second_moment_corrected) + self.eps)
                 param.data -= self.lr * nadam_adjustment
 
-        self.time_step += 1 
+            self.time_step += 1 
     
     def reset_gradients(self):
         for param in self.model.parameters():
+            np.clip(param.grad, -1, 1, out=param.grad)
             param.grad.fill(0)
-
 
 class SoftmaxCrossEntropy:
     def __call__(self, x, y):
         batch_size = y.shape[0]
         x.label = "y_pred"
-        x_data = x.data 
+        x_data = x.data  
         # print("x_data shape : ", x_data.shape)
-        # max_x = np.max(x_data, axis=0, keepdims=True)  
+        # max_x = np.max(x_data, axis=0, keepdims=True) 
         # exps = np.exp(x_data - max_x)
         # print(x_data)
 
 
         exps = np.exp(x_data)
         # softmax = exps / (1 + exps) #for sigmoid
-        softmax = exps / np.sum(exps, axis=1, keepdims=True)   
+        softmax = exps / np.sum(exps, axis=1, keepdims=True) 
 
         # print("softmax shape : ", softmax.shape)
         
@@ -289,7 +311,7 @@ class SoftmaxCrossEntropy:
         # Cross-entropy loss
 
         
-        loss_data = -np.log(softmax)  
+        loss_data = -np.log(softmax) 
         mask = np.zeros_like(loss_data)
         mask[np.arange(y.shape[0]), y] = 1
         loss_data = loss_data * mask
@@ -298,6 +320,7 @@ class SoftmaxCrossEntropy:
 
         loss_data = loss_data.sum() / batch_size
         loss = Value(loss_data, (x,), 'softmax_ce')  
+
         self.softmax = softmax
         self.x = x
         self.y = y
@@ -311,9 +334,11 @@ class SoftmaxCrossEntropy:
             #full_grad = softmax (1 - softmax)
             
            
-        
+    
             y_indices = np.array(y.data, dtype=np.int32)  
             grad[np.arange(batch_size), y_indices] -= 1 
+            grad /= batch_size 
+         
 
             x.grad += grad 
 
@@ -332,53 +357,60 @@ class SoftmaxCrossEntropy:
 
 # print(xs.shape, ys.shape)
 
-xs = Value(xs)
-# ys = Value(ys)
+# xs_train = Value(xs_train)
+# ys_train = np.array(ys_train)  # Ensure ys remains a NumPy array
 
-# # print("mean of xs : ", xs.mean(), xs.std())
-# xs = np.array(xs)  # Keep xs as Value
-ys = np.array(ys)  # Ensure ys remains a NumPy array
+batch_size = 32
+
+def create_batch(lst, batch_size):
+    return [lst[i:i + batch_size] for i in range(0, len(lst), batch_size)]
+
+xs_train_batches = create_batch(xs_train, batch_size)
+ys_train_batches = create_batch(ys_train, batch_size)
+
+assert len(xs_train_batches) == len(ys_train_batches)
+
+n_batches = len(xs_train_batches)
 
 
-model = MLP(784, [512, 256,10])
+model = MLP(784, [256, 256,256,10])
 loss_fn = SoftmaxCrossEntropy()
 # lr = 0.01
-opt = optimizer(model, learning_rate= 0.01, algo = "momentum")
-for k in range(100):
-    # print("\n\n", k)
-    ypred = model(xs)
-    # print(ypred)
-    loss, softmax = loss_fn(ypred, ys)
-    # for p in model.parameters():
-    #     p.grad.fill(0)  
+opt = optimizer(model, learning_rate= 0.001, algo = "adam")
+for k in range(10):
+    avg_loss = 0
+    avg_acc = 0
 
-    # loss.backward()
+    for xs_batch, ys_batch in zip(xs_train_batches, ys_train_batches):
 
-    opt.reset_gradients()
-    loss.backward()
+        xs_batch = Value(xs_batch)
+        ys_batch = np.array(ys_batch)
+
+        for p in model.parameters():
+            p.grad.fill(0)  
+        ypred = model(xs_batch)
+        loss, softmax = loss_fn(ypred, ys_batch)
+
+        loss.backward()
+        opt.update()
+
+        avg_loss += (loss.data/n_batches)
+
+        max_ = np.argmax(ypred.data, axis=1)
+        correct_predictions = np.sum(max_ == ys_batch)
+        accuracy = correct_predictions / batch_size  
+
+        avg_acc += (accuracy/n_batches)
+
+    print(f"Iteration {k}: Loss = {loss.data} | acc : {avg_acc*100}")  
     
 
-
-    print(f"Iteration {k}: Loss = {loss.data}")  
-    # grad_norm = []
-    # for i, p in enumerate(model.parameters()):
-    #     grad_norm.append(np.linalg.norm(p.grad.data))
-    # # print("grad norms : ", grad_norm)
-
-    # loss = None
-
-
-    # for i, p in enumerate(model.parameters()):
-    #     # print(p)
-    #     # print(f"Layer {i}: Weight sum: {np.sum(p.data)}, Grad sum: {np.sum(p.grad)}")
-    #     # p.data -= (lr*0.993**k) * (p.grad + p.data*0.005) 
-    #     p.data -= lr*p.grad
-    opt.update()
-
-ypred = model(xs)
+xs_dev = Value(xs_dev)
+ys_dev = np.array(ys_dev)
+ypred = model(xs_dev)
 max_ = np.argmax(ypred.data, axis=1)
-correct_predictions = np.sum(max_ == ys)  
-total_samples = len(ys)  
+correct_predictions = np.sum(max_ == ys_dev)  
+total_samples = len(ys_dev)  
 
 accuracy = correct_predictions / total_samples  
 accuracy_percentage = accuracy * 100  
@@ -386,8 +418,9 @@ accuracy_percentage = accuracy * 100
 print(f"Accuracy: {accuracy:.4f} ({accuracy_percentage:.2f}%)")
 
 print("\n\n")
-print("Target : ", ys)
+print("Target : ", ys_dev)
 print("Predicted : ", max_)
 print(f"Accuracy: {accuracy:.4f} ({accuracy_percentage:.2f}%)")
 # print("accuracy:" np.where )
 # print("Predicted : ", (ypred.data > 0).astype(int).reshape(-1))
+
