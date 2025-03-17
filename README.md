@@ -51,7 +51,7 @@ If logging is enabled (`-log True`), the script logs training details to **Weigh
 The script automatically initializes WandB logging if the project and entity are provided. It then trains the model and logs the results.
 
 ### Links 
-wandb -
+wandb - https://wandb.ai/nishant19697-indian-institute-of-technology-madras/sweep_trial05/reports/DA6401-Assignment-1--VmlldzoxMTgzMzg1OQ?accessToken=17sg9hqrmo6bdglwzuy68wnxjdkuucottceyn7i3zdiwoln5wqsiijlhgi2ekwbf
 github - https://github.com/Nishant19697/DL_assignment_01
 
 ## Contact
