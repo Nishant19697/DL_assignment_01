@@ -24,8 +24,31 @@ class Value:
         return out
 
 
+    def mean(self):
+        out = Value(np.mean(self.data), (self, ))
+        
+        B, d = self.data.shape
+        
+        def _backward():
+            self.grad += out.grad * (1/(B*d))
+        
+        out._backward = _backward
+        return out
+
     def __repr__(self):
         return f"Value(name={self.label}, data={self.data}), grad_fn={self._backward}"
+    
+    def __sub__(self, other):
+        assert self.data.shape == other.data.shape
+        out = Value(self.data - other.data, (self, other), "-")
+        
+        def _backward():
+            other.grad += out.grad * (-1)
+            self.grad += out.grad
+            
+        out._backward = _backward
+        return out
+        
 
     def __add__(self, other):
         other = other if isinstance(other, Value) else Value(other)
@@ -116,8 +139,6 @@ class Value:
         def _backward():
             if self.grad is None or self.grad.shape != self.data.shape:
                 self.grad = np.zeros_like(self.data)
-
-            # Apply ReLU gradient
             self.grad += (self.data > 0).astype(self.data.dtype) * out.grad
 
         out._backward = _backward
@@ -167,7 +188,7 @@ class Layer:
         if init == "Xavier":
             bound = np.sqrt(6 / (nin + nout))
             self.w = Value(np.random.uniform(-bound, bound, (nin, nout)))
-        elif init == "kaiming":  # He initialization
+        elif init == "kaiming":  
             std = np.sqrt(2 / nin)
             self.w = Value(np.random.randn(nin, nout) * std)
         elif init == "random":
@@ -245,26 +266,63 @@ class optimizer:
         self.v_max = {param: np.zeros_like(param.data) for param in model.parameters()} if amsgrad else None
     
     def update(self):
+        # for param in self.model.parameters():
+        #     if self.algo == "sgd":
+        #         param.data -= self.lr * param.grad 
         for param in self.model.parameters():
             if self.algo == "sgd":
-                param.data -= self.lr * param.grad 
+                # Weight decay (if enabled)
+                param.data -= self.lr * (param.grad + self.weight_decay * param.data)        
 
-            elif self.algo == "momentum":
+            # elif self.algo == "momentum":
+            #     self.vel[param] = self.momentum * self.vel[param] - self.lr * param.grad
+            #     param.data += self.vel[param]
+
+            if self.algo == "momentum":
+                if self.weight_decay != 0:
+                    param.grad += self.weight_decay * param.data  # Apply weight decay
+                
+                # Update velocity
                 self.vel[param] = self.momentum * self.vel[param] - self.lr * param.grad
+                
+                # Update parameters
                 param.data += self.vel[param]
 
-            elif self.algo == "nesterov":
-                prev_velocity = self.vel[param]
+
+            # elif self.algo == "nag":
+            #     prev_velocity = self.vel[param]
+            #     self.vel[param] = self.momentum * self.vel[param] - self.lr * param.grad
+            #     param.data += -self.momentum * prev_velocity + (1 + self.momentum) * self.vel[param]
+
+            elif self.algo == "nag":
+                if self.weight_decay != 0:
+                    param.grad += self.weight_decay * param.data  # Apply weight decay
+
+                # Update velocity
+                prev_velocity = self.vel[param].copy()  # Save previous velocity
                 self.vel[param] = self.momentum * self.vel[param] - self.lr * param.grad
+
+                # Nesterov accelerated update
                 param.data += -self.momentum * prev_velocity + (1 + self.momentum) * self.vel[param]
 
+            # elif self.algo == "rmsprop":
+            #     self.second_moment[param] = self.decay * self.second_moment[param] + (1 - self.decay) * (param.grad ** 2)
+            #     param.data -= self.lr * param.grad / (np.sqrt(self.second_moment[param]) + self.eps)
+
             elif self.algo == "rmsprop":
+                if self.weight_decay != 0:
+                    param.grad += self.weight_decay * param.data  # Apply weight decay
+
+                # Update second moment estimate
                 self.second_moment[param] = self.decay * self.second_moment[param] + (1 - self.decay) * (param.grad ** 2)
-                param.data -= self.lr * param.grad / (np.sqrt(self.second_moment[param]) + self.eps)
+
+                # Perform RMSProp update
+                param.data -= self.lr * param.grad / (np.sqrt(self.second_moment[param] + self.eps))
 
             elif self.algo == "adam":
                 if self.weight_decay != 0:
-                    param.grad += self.weight_decay * param.data
+                    param.data *= (1 - self.lr * self.weight_decay)
+
 
                 self.first_moment[param] = self.beta1 * self.first_moment[param] + (1 - self.beta1) * param.grad
                 self.second_moment[param] = self.beta2 * self.second_moment[param] + (1 - self.beta2) * (param.grad ** 2)
@@ -278,52 +336,69 @@ class optimizer:
 
                 param.data -= self.lr * first_moment_corrected / (np.sqrt(second_moment_corrected) + self.eps)
 
+            # elif self.algo == "nadam":
+
+            #     if self.weight_decay != 0:
+            #         param.data *= (1 - self.lr * self.weight_decay)
+
+            #     first_moment_estimate = self.beta1 * self.first_moment[param] + (1 - self.beta1) * param.grad
+            #     self.second_moment[param] = self.beta2 * self.second_moment[param] + (1 - self.beta2) * (param.grad ** 2)
+
+            #     first_moment_corrected = first_moment_estimate / (1 - self.beta1 ** self.time_step)
+            #     second_moment_corrected = self.second_moment[param] / (1 - self.beta2 ** self.time_step)
+
+            #     nadam_adjustment = (self.beta1 * first_moment_corrected + (1 - self.beta1) * param.grad) / (np.sqrt(second_moment_corrected) + self.eps)
+            #     param.data -= self.lr * nadam_adjustment
+
+
             elif self.algo == "nadam":
-                first_moment_estimate = self.beta1 * self.first_moment[param] + (1 - self.beta1) * param.grad
+                if self.weight_decay != 0:
+                    param.data *= (1 - self.lr * self.weight_decay)
+
+                # First and second moment update
+                self.first_moment[param] = self.beta1 * self.first_moment[param] + (1 - self.beta1) * param.grad
                 self.second_moment[param] = self.beta2 * self.second_moment[param] + (1 - self.beta2) * (param.grad ** 2)
 
-                first_moment_corrected = first_moment_estimate / (1 - self.beta1 ** self.time_step)
-                second_moment_corrected = self.second_moment[param] / (1 - self.beta2 ** self.time_step)
+                # Bias correction
+                first_moment_corrected = self.first_moment[param] / max(1e-8, (1 - self.beta1 ** self.time_step))
+                second_moment_corrected = self.second_moment[param] / max(1e-8, (1 - self.beta2 ** self.time_step))
 
-                nadam_adjustment = (self.beta1 * first_moment_corrected + (1 - self.beta1) * param.grad) / (np.sqrt(second_moment_corrected) + self.eps)
+                # Nadam adjustment with correct momentum correction
+                nadam_momentum_correction = self.beta1 * first_moment_corrected + (1 - self.beta1) * param.grad / (1 - self.beta1 ** self.time_step)
+                nadam_adjustment = nadam_momentum_correction / (np.sqrt(second_moment_corrected) + self.eps)
+
+                # Parameter update
                 param.data -= self.lr * nadam_adjustment
 
-            self.time_step += 1 
+            
+
+        self.time_step += 1 
     
     def reset_gradients(self):
         for param in self.model.parameters():
             np.clip(param.grad, -1, 1, out=param.grad)
             param.grad.fill(0)
 
+class MSELoss:
+    def __call__(self, x, y):
+        y_one_hot = np.zeros_like(x.data)
+        y_one_hot[np.arange(y.shape[0]), y] = 1
+        loss = ((x - Value(y_one_hot)) ** 2).mean()
+        return loss
+        
+
 class SoftmaxCrossEntropy:
     def __call__(self, x, y):
         batch_size = y.shape[0]
         x.label = "y_pred"
         x_data = x.data  
-        # print("x_data shape : ", x_data.shape)
-        # max_x = np.max(x_data, axis=0, keepdims=True) 
-        # exps = np.exp(x_data - max_x)
-        # print(x_data)
-
-
         exps = np.exp(x_data)
-        # softmax = exps / (1 + exps) #for sigmoid
-        softmax = exps / np.sum(exps, axis=1, keepdims=True) 
+        softmax = exps / (np.sum(exps, axis=1, keepdims=True) + 1e-8)
 
-        # print("softmax shape : ", softmax.shape)
-        
-        # print(type(y))
-        # print(type(softmax))
-        # print(y.shape, softmax.shape)
-        # Cross-entropy loss
-
-        
         loss_data = -np.log(softmax) 
         mask = np.zeros_like(loss_data)
         mask[np.arange(y.shape[0]), y] = 1
         loss_data = loss_data * mask
-
-        #loss_data = (softmax - y[:, np.newaxis])**2 #for sigmoid
 
         loss_data = loss_data.sum() / batch_size
         loss = Value(loss_data, (x,), 'softmax_ce')  
@@ -335,35 +410,45 @@ class SoftmaxCrossEntropy:
         def _backward():
             batch_size = x.data.shape[0]
             grad = softmax.copy()
-
-            #grad = 2 * (grad - self.y[:, np.newaxis]) * grad * (1 - grad) #for sigmoid
-
-            #full_grad = softmax (1 - softmax)
-            
-           
-    
             y_indices = np.array(y.data, dtype=np.int32)  
             grad[np.arange(batch_size), y_indices] -= 1 
             grad /= batch_size 
-         
-
             x.grad += grad 
 
         loss._backward = _backward
         loss._prev = {x}
         loss.label = "loss"
-        return loss, softmax
+        return loss
 
 
-def trainer(args, logging):
+def train_and_eval(args, logging):
 
+    if args.dataset == "mnist":
+        (X_train, y_train), (x_test, y_test) = mnist.load_data()
+        labels = {0: "0",
+          1: "1",
+          2: "2",
+          3: "3",
+          4: "4",
+          5: "5",
+          6: "6",
+          7: "7",
+          8: "8",
+          9: "9"}
 
-    if args.dataset == "fashion_mnist":
-        (X_train, y_train), (_, _) = fashion_mnist.load_data()
-    elif args.dataset == "mnist":
-        (X_train, y_train), (_, _) = mnist.load_data()
+    elif args.dataset == "fashion_mnist":
+        (X_train, y_train), (x_test, y_test) = fashion_mnist.load_data()
+        labels = {0: "T-shirt/top",
+          1: "Trouser",
+          2: "Pullover",
+          3: "Dress",
+          4: "Coat",
+          5: "Sandal",
+          6: "Shirt",
+          7: "Sneaker",
+          8: "Bag",
+          9: "Ankle boot"}
         
-    print(f"Dataset shape: {X_train.shape}, Labels shape: {y_train.shape}")  
 
     X_train_flattened = X_train.reshape(X_train.shape[0], -1).astype(np.float32)
     y_train_reshaped = y_train.reshape(-1, 1)  
@@ -389,6 +474,10 @@ def trainer(args, logging):
 
     xs_dev = xs[int(0.9*n_samples):]
     ys_dev = ys[int(0.9*n_samples):]
+    
+    x_test = x_test.reshape(-1, 784)
+    x_test = x_test/255
+    
 
 
     print(f"Total Samples in train: {len(xs_train)}, Unique Labels: {set(ys)}")
@@ -411,7 +500,13 @@ def trainer(args, logging):
     hidden_size = [args.hidden_size] * args.num_layers + [10]
 
     model = MLP(784, hidden_size, args)
-    loss_fn = SoftmaxCrossEntropy()
+    
+    if args.loss == "cross_entropy":
+        loss_fn = SoftmaxCrossEntropy()
+    elif args.loss == "mean_squared_error":
+        loss_fn = MSELoss()
+    else:
+        raise ValueError(f"Unsuppoted Loss function : ", {args.loss})
     # lr = 0.01
     opt = optimizer(model, learning_rate= 0.001, algo = args.optimizer, beta1 = args.beta1, beta2=args.beta2, eps=args.epsilon, momentum=args.momentum, weight_decay=args.weight_decay)
     
@@ -432,9 +527,15 @@ def trainer(args, logging):
             for p in model.parameters():
                 p.grad.fill(0)  
             ypred = model(xs_batch)
-            loss, softmax = loss_fn(ypred, ys_batch)
+            loss = loss_fn(ypred, ys_batch)
 
             loss.backward()
+
+            for param in model.parameters():
+                norm_ = np.sqrt(np.power(param.grad, 2).sum())
+                param.grad *= (2/norm_)
+
+
             opt.update()
 
             avg_loss += (loss.data/n_batches)
@@ -452,7 +553,7 @@ def trainer(args, logging):
 
         # validation
         ypred = model(xs_dev)
-        loss, softmax = loss_fn(ypred, ys_dev)
+        loss = loss_fn(ypred, ys_dev)
         max_ = np.argmax(ypred.data, axis=1)
         correct_predictions = np.sum(max_ == ys_dev)  
         total_samples = len(ys_dev)  
@@ -465,10 +566,26 @@ def trainer(args, logging):
 
         print(f"Accuracy: {accuracy:.4f} ({accuracy_percentage:.2f}%)")
 
-        # print("\n\n")
-        # print("Target : ", ys_dev)
-        # print("Predicted : ", max_)
-        # print(f"Accuracy: {accuracy:.4f} ({accuracy_percentage:.2f}%)")
-        # # print("accuracy:" np.where )
-        # # print("Predicted : ", (ypred.data > 0).astype(int).reshape(-1))
+    x_test = Value(x_test)
+    ypred = model(x_test)
+    loss = loss_fn(ypred, y_test)
+    max_ = np.argmax(ypred.data, axis=1)
+    correct_predictions = np.sum(max_ == ys_dev)  
+    total_samples = len(ys_dev)  
 
+    accuracy = correct_predictions / total_samples  
+    accuracy_percentage = accuracy * 100  
+    
+    if logging:
+        wandb.log({"test_loss":loss.data, "test_acc":accuracy})
+
+    print(f"Accuracy: {accuracy:.4f} ({accuracy_percentage:.2f}%)")
+    
+    
+    
+    preds = max_
+    target = y_test
+    wandb.log({"confusion_matrix" : wandb.plot.confusion_matrix(probs=None, y_true=target, preds=preds, class_names=labels)})
+
+
+    
